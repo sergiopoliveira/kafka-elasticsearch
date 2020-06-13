@@ -12,6 +12,8 @@ import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.clients.consumer.ConsumerRecords;
 import org.apache.kafka.clients.consumer.KafkaConsumer;
 import org.apache.kafka.common.serialization.StringDeserializer;
+import org.elasticsearch.action.bulk.BulkRequest;
+import org.elasticsearch.action.bulk.BulkResponse;
 import org.elasticsearch.action.index.IndexRequest;
 import org.elasticsearch.action.index.IndexResponse;
 import org.elasticsearch.client.RequestOptions;
@@ -67,8 +69,7 @@ public class ElasticSearchConsumer {
         properties.setProperty(ConsumerConfig.GROUP_ID_CONFIG, groupId);
         properties.setProperty(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest");
         properties.setProperty(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, "false"); // disable auto commit of offsets
-        properties.setProperty(ConsumerConfig.MAX_POLL_RECORDS_CONFIG, "10");
-
+        properties.setProperty(ConsumerConfig.MAX_POLL_RECORDS_CONFIG, "100");
 
 
         // create consumer
@@ -90,8 +91,11 @@ public class ElasticSearchConsumer {
         while (true) {
             ConsumerRecords<String, String> records = consumer.poll(Duration.ofMillis(100));
 
-
+            int count = records.count();
             logger.info("Received " + records.count() + " records");
+
+            BulkRequest bulkRequest = new BulkRequest();
+
             for (ConsumerRecord<String, String> record : records) {
                 // where we insert data into ElasticSearch
                 String jsonString = record.value();
@@ -101,28 +105,29 @@ public class ElasticSearchConsumer {
                 //String id = record.topic() + record.partition() + record.offset();
 
                 // twitter feed specific ID
-                String id = extractIdFromTweet(record.value());
-
-                IndexRequest indexRequest = new IndexRequest("twitter", "tweets",
-                        id // this is to make our consumer idempotent
-                ).source(jsonString, XContentType.JSON);
-                IndexResponse indexResponse = client.index(indexRequest, RequestOptions.DEFAULT);
-                logger.info(indexResponse.getId());
                 try {
-                    Thread.sleep(10); // introduce a small delay
+                    String id = extractIdFromTweet(record.value());
+
+                    IndexRequest indexRequest = new IndexRequest("twitter", "tweets",
+                            id // this is to make our consumer idempotent
+                    ).source(jsonString, XContentType.JSON);
+
+                    bulkRequest.add(indexRequest); // we add to our bulk request (takes no time)
+                } catch (NullPointerException e) {
+                    logger.warn("skipping bad data: " + record.value());
+                }
+            }
+            if (count > 0) {
+                BulkResponse bulkItemResponses = client.bulk(bulkRequest, RequestOptions.DEFAULT);
+                logger.info("Commiting the offsets...");
+                consumer.commitSync();
+                logger.info("Offsets have been commited");
+                try {
+                    Thread.sleep(1000);
                 } catch (InterruptedException e) {
                     e.printStackTrace();
                 }
             }
-            logger.info("Commiting the offsets...");
-            consumer.commitSync();
-            logger.info("Offsets have been commited");
-            try {
-                Thread.sleep(1000);
-            } catch (InterruptedException e) {
-                e.printStackTrace();
-            }
-
         }
 
         // close the client gracefully
